@@ -190,17 +190,33 @@ def unrelease_issue(iid):
 def new_issue():
     allow_roles('coordinator','admin')
     if request.method=='POST':
-        try:num=int(request.form['number']);date=request.form['date']
-        except (ValueError,KeyError):flash('Issue number and date are required','error');return redirect(request.url)
-        urls=[request.form.get('url_'+str(j),'').strip() for j in range(1,11)]
-        if len(urls)!=10 or not all(safeurl(x) for x in urls) or len(set(urls))!=10:
-            flash('Enter ten distinct, valid public http(s) URLs.','error');return redirect(request.url)
+        with db() as c:
+            next_number=c.execute('SELECT COALESCE(MAX(number),258)+1 AS n FROM issues').fetchone()['n']
+        try:
+            num=int(request.form.get('number','').strip() or next_number)
+            date=request.form.get('date','').strip() or datetime.date.today().isoformat()
+            if num<1:raise ValueError()
+            datetime.date.fromisoformat(date)
+        except ValueError:
+            flash('Use a positive issue number and a valid publication date, or leave them blank.','error');return redirect(request.url)
+        entries=[]
+        for j in range(1,11):
+            u=request.form.get('url_'+str(j),'').strip()
+            if not u:continue
+            category=request.form.get('category_'+str(j),'').strip() or 'شركات'
+            img=request.form.get('image_'+str(j),'').strip()
+            if not safeurl(u) or category not in CATEGORIES or (img and not safeurl(img)):
+                flash('Use valid public URLs and an available category.','error');return redirect(request.url)
+            entries.append((u,request.form.get('content_'+str(j),'').strip(),request.form.get('title_'+str(j),'').strip(),category,img))
+        if not entries or len({x[0] for x in entries})!=len(entries):
+            flash('Enter at least one article URL. Article URLs must be distinct.','error');return redirect(request.url)
         with db() as c:
             try:
                 cur=c.execute('INSERT INTO issues(number,pub_date) VALUES(?,?)'+(' RETURNING id' if os.getenv('DATABASE_URL') else ''),(num,date));iid=cur.fetchone()['id'] if os.getenv('DATABASE_URL') else cur.lastrowid
             except (sqlite3.IntegrityError, __import__('psycopg').IntegrityError):flash('Issue number already exists','error');return redirect(request.url)
-            for j,u in enumerate(urls,1):c.execute('INSERT INTO articles(issue_id,position,url,supplied_content) VALUES(?,?,?,?)',(iid,j,u,request.form.get('content_'+str(j),'').strip()))
-            audit(c,iid,None,'issue_created',{'urls':len(urls)})
+            for j,(u,content,title,category,img) in enumerate(entries,1):
+                c.execute('INSERT INTO articles(issue_id,position,url,supplied_content,source_title,category,image_url) VALUES(?,?,?,?,?,?,?)',(iid,j,u,content,title,category,img))
+            audit(c,iid,None,'issue_created',{'urls':len(entries)})
         return redirect(url_for('view_issue',iid=iid))
     return render_template('new.html',date=datetime.date.today().isoformat())
 @app.route('/issues/<int:iid>')
@@ -311,8 +327,8 @@ def approve(iid):
     if role() not in ('approver','admin'):abort(403)
     with db() as c:
         aa,missing=latest_reviews(c,iid)
-        if len(aa)!=10 or missing:
-            flash('Cannot approve: '+('; '.join(missing[:4]) or 'Ten articles required'),'error');return redirect(url_for('view_issue',iid=iid))
+        if not 1<=len(aa)<=10 or missing:
+            flash('Cannot approve: '+('; '.join(missing[:4]) or 'One to ten articles required'),'error');return redirect(url_for('view_issue',iid=iid))
         snapshot={'issue':i['number'],'date':i['pub_date'],'articles':[{k:a[k] for k in ('position','url','headline','body','category','image_url','image_local','image_asset_id','image_license_status','revision')} for a in aa]}
         snap=json.dumps(snapshot,ensure_ascii=False)
         c.execute('UPDATE issues SET status=\'approved\',approved_at=?,approved_snapshot=? WHERE id=?',(now(),snap,iid));c.execute('INSERT INTO reviews(issue_id,article_id,stage,revision,reviewer,decision) VALUES(?,NULL,\'final\',0,?,\'approved\')',(iid,actor()));audit(c,iid,None,'master_approved')
