@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+image-review/
+shutterstock-review/
+__pycache__/
+.venv/
+.env
+.env.*
+!.env.example
+!platform/.env.example
+!platform/.env.production.example
+platform/data/
+__pycache__/
+*.pyc
