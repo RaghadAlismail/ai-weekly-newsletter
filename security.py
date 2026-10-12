@@ -40,4 +40,5 @@ def csrf_token():
 def enforce_csrf():
     if request.method in ('POST','PUT','PATCH','DELETE'):
         supplied=request.form.get('_csrf') or request.headers.get('X-CSRF-Token','')
-        if not hmac.compare_digest(str(supplied),str(session.get('_csrf',''))):abort(400,'CSRF validation failed')
+        expected=session.get('_csrf')
+        if not expected or not supplied or not hmac.compare_digest(str(supplied),str(expected)):abort(400,'CSRF validation failed')
