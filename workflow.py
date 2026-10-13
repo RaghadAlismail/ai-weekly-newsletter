@@ -19,6 +19,8 @@ def check_edit(issue,email,role):
 def register_workflow(app,h):
     db=h['db'];issue=h['issue'];actor=h['actor'];role=h['role'];require=h['require_login'];people=h['authorized_people'];audit=h['audit']
     migrate_workflow(h['DATA'])
+    with db() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS validated_article_generations (article_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL)')
     # In-process jobs remain resumable: an interrupted job exposes a retry action.
     active=set();lock=threading.Lock()
     def rows(iid):
@@ -51,42 +53,47 @@ def register_workflow(app,h):
         from write_summary import write_summary,detect_category
         from review_summary import review_summary
         from fact_checker import fact_check
-        source={'title':a['source_title'],'text':a['supplied_content'],'image_url':a['image_url']}
+        source={'title':a['source_title'],'text':a['supplied_content'] or a['source_text'],'image_url':a['image_url']}
         if len(source['text'].strip())<200:
             extracted=fetch_article(a['url'])
             source['title']=source['title'] or extracted['title'];source['text']=extracted['text'];source['image_url']=source['image_url'] or extracted['image_url']
         if len(source['text'].strip())<200:raise ValueError('Provide sufficient original source text.')
+        with db() as c:
+            c.execute('UPDATE articles SET source_title=?,source_text=?,image_url=? WHERE id=?',(source['title'],source['text'],source['image_url'],a['id']))
         en,ar=detect_category(source['title'],source['text'])
         category=a['category'] or ar
         if category not in h['CATEGORIES']:category='دراسات' if en in ('Studies','Universities') else 'شركات'
+        from generation_quality import validate_copy
         result=write_summary(source['title'],source['text'],en)
-        result=review_summary(result,en,source['title'],source['text'])
-        result=fact_check(result,source['text'])
-        if result.get('approved') is False:raise ValueError('The source-fidelity check needs manual attention before this slide is ready.')
+        result=validate_copy(result, en, source['title'], source['text'], review_summary, fact_check)
         title=str(result.get('title_ar','')).strip();body=str(result.get('body_ar','')).strip()
-        import re
-        if not title or len(title)>110 or re.search('[A-Za-z]',title) or not body or not 40<=len(body.split())<=170:
-            raise ValueError('Generated Arabic copy failed the title or summary checks. Retry or review the source.')
         with db() as c:stored=c.execute('SELECT payload FROM article_media WHERE article_id=?',(a['id'],)).fetchone()
         image=base64.b64decode(stored['payload']) if stored else (fetch_image(source['image_url']) if source['image_url'] else None)
         if not image:raise ValueError('No usable source image was found. Add an image URL or upload an image, then retry.')
         with db() as c:
             c.execute('UPDATE articles SET source_title=?,source_text=?,extract_status=?,headline=?,body=?,category=?,image_url=?,extract_notes=?,revision=revision+1 WHERE id=?',(source['title'],source['text'],'supplied' if a['supplied_content'] else 'ready',title,body,category,source['image_url'],'',a['id']))
             c.execute('INSERT INTO article_media(article_id,payload) VALUES(?,?) ON CONFLICT(article_id) DO UPDATE SET payload=excluded.payload',(a['id'],base64.b64encode(image).decode()))
+            revision=c.execute('SELECT revision FROM articles WHERE id=?',(a['id'],)).fetchone()['revision']
+            c.execute('INSERT INTO validated_article_generations(article_id,revision) VALUES(?,?) ON CONFLICT(article_id) DO UPDATE SET revision=excluded.revision',(a['id'],revision))
 
     def run(iid,who):
         with app.app_context():
             try:
                 failures=[]
                 def guarded(a):
-                    try:process(a)
+                    try:
+                        with db() as c:
+                            cached=c.execute('SELECT v.article_id FROM validated_article_generations v JOIN article_media m ON m.article_id=v.article_id WHERE v.article_id=? AND v.revision=?',(a['id'],a['revision'])).fetchone()
+                        if a['headline'] and a['body'] and not a['extract_notes'] and cached:
+                            return None
+                        process(a)
                     except Exception as ex:
                         message=f"Article {a['position']}: {str(ex)[:180]}"
                         # API exception text can include URLs, so hide external error details.
                         if 'api.openai.com' in message:message=f"Article {a['position']}: AI service rejected the request. Check the configured model and API account."
                         with db() as c:c.execute('UPDATE articles SET extract_notes=? WHERE id=?',(message,a['id']))
                         return message
-                with ThreadPoolExecutor(max_workers=2) as pool:
+                with ThreadPoolExecutor(max_workers=1) as pool:
                     failures=[x for x in pool.map(guarded,rows(iid)) if x]
                 if failures:raise ValueError('\n'.join(failures))
                 deck=build_deck(snapshot(iid),media(iid))

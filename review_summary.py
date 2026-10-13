@@ -22,14 +22,13 @@ Review the EN and AR summaries below and fix ANY issues. Return corrected versio
 4. Remove phrases such as "ويعكس ذلك..."، "ومن المتوقع..."، "وقد يساهم..."، "في خطوة ثورية..." unless explicitly stated in the source.
 
 ### Arabic Title Rules
-1. The title must start with the actor/entity and use formal, concise Arabic.
-2. Entity names must be written as Arabic Name (English Name), e.g. شركة أوبن إيه آي (OpenAI), جامعة كامبريدج (University of Cambridge), شركة غوغل كلاود (Google Cloud).
-3. Do not use English names alone in Arabic text.
-4. Do not translate technical product names; keep product names in parentheses when needed, e.g. (GPT-5.5), (Meta AI), (TPU), (Gemini).
-5. Use category-appropriate headline patterns:
-   - Companies: أعلنت شركة ... / كشفت شركة ... / أطلقت شركة ...
-   - Universities/Research: طوّر باحثون في جامعة ... / كشف باحثون في جامعة ... / حذّر باحثون في جامعة ...
-   - Governments: أعلنت الحكومة ... / تدرس الحكومة ... / أفادت وكالة رويترز ...
+1. Start with the actor/entity or noun, not a past-tense verb.
+2. Use Arabic script only. Do not include Latin letters, English names or nationality.
+3. Keep the headline concise, at most 110 characters.
+4. Companies: شركة ... تطلق / شركة ... تكشف / شركة ... تعلن.
+5. Research: باحثون من جامعة ... يطوّرون / دراسة ... تكشف.
+6. Governments: حكومة ... تعلن / وزارة ... تطلق / هيئة ... تعتمد.
+7. Put English organization and product names in parentheses in the BODY only.
 
 ### Arabic Body Rules
 1. Body_ar must be ONE paragraph only.

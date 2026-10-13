@@ -25,7 +25,13 @@ def fetch_bytes(url,limit=6000000):
     raise ValueError('Too many source redirects.')
 
 def fetch_article(url):
-    data,resolved=fetch_bytes(url,3000000);soup=BeautifulSoup(data,'html.parser')
+    try:
+        data,resolved=fetch_bytes(url,3000000)
+    except requests.HTTPError as ex:
+        if ex.response is not None and ex.response.status_code in (401,403):
+            raise ValueError('Source blocks automatic access. Paste the original article text in the optional content field, then retry.') from None
+        raise ValueError('Source download failed. Paste the original article text and retry.') from None
+    soup=BeautifulSoup(data,'html.parser')
     title=soup.find('meta',property='og:title')
     title=title.get('content','') if title else (soup.title.get_text(' ',strip=True) if soup.title else '')
     image=soup.find('meta',property='og:image') or soup.find('meta',attrs={'name':'twitter:image'})
