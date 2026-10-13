@@ -13,3 +13,6 @@ __pycache__/
 platform/data/
 __pycache__/
 *.pyc
+
+*.private
+qa-*

@@ -1,51 +1,50 @@
-"""Native Google Slides publisher using a placeholder-tagged template.
-Requires GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_SLIDES_TEMPLATE_ID, GOOGLE_DRIVE_FOLDER_ID.
-The template is expected to have slide 1 cover and slides 2-11 article placeholders.
-Each repeated placeholder is scoped to its slide pageObjectId.
-"""
-import os
-from google.oauth2 import service_account
-import json
-from googleapiclient.discovery import build
-SCOPES=['https://www.googleapis.com/auth/drive.file','https://www.googleapis.com/auth/presentations']
-def get_credentials(scopes):
-    raw=os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON','').strip()
-    if raw:
-        return service_account.Credentials.from_service_account_info(json.loads(raw),scopes=scopes)
-    path=os.getenv('GOOGLE_APPLICATION_CREDENTIALS','')
-    if path:
-        return service_account.Credentials.from_service_account_file(path,scopes=scopes)
-    raise RuntimeError('Google publishing credentials are not configured')
+"""Private Google Workspace exports using the editor's explicit OAuth consent."""
+import os,json,base64,hashlib,io
+from flask import current_app,session
+from cryptography.fernet import Fernet
+from storage import database
+SCOPES=['https://www.googleapis.com/auth/drive.file','https://www.googleapis.com/auth/presentations','https://www.googleapis.com/auth/documents']
+def token_cipher():
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(str(current_app.secret_key).encode()).digest()))
+def token_db():
+    return database(os.getenv('NEWSLETTER_DATA_DIR','/tmp/newsletter-data'))
+def store_google_token(email,token):
+    with token_db() as c:
+        old=c.execute('SELECT payload FROM google_oauth_tokens WHERE email=?',(email,)).fetchone()
+        if old and not token.get('refresh_token'):
+            prior=json.loads(token_cipher().decrypt(old['payload'].encode()));token['refresh_token']=prior.get('refresh_token')
+        payload=token_cipher().encrypt(json.dumps(token).encode()).decode()
+        c.execute('INSERT INTO google_oauth_tokens(email,payload) VALUES(?,?) ON CONFLICT(email) DO UPDATE SET payload=excluded.payload',(email,payload))
+def publishing_connected(email):
+    with token_db() as c:return c.execute('SELECT email FROM google_oauth_tokens WHERE email=?',(email,)).fetchone() is not None
 
-def create_google_slides(snapshot):
-    missing=[k for k in ('GOOGLE_SLIDES_TEMPLATE_ID','GOOGLE_DRIVE_FOLDER_ID') if not os.getenv(k)]
-    if missing:raise RuntimeError('Missing '+', '.join(missing))
-    creds=get_credentials(SCOPES)
-    drive=build('drive','v3',credentials=creds,cache_discovery=False)
-    slides=build('slides','v1',credentials=creds,cache_discovery=False)
-    template=os.environ['GOOGLE_SLIDES_TEMPLATE_ID'];folder=os.environ['GOOGLE_DRIVE_FOLDER_ID']
-    copy=drive.files().copy(fileId=template,body={'name':f'نشرة الذكاء الاصطناعي {snapshot["issue"]} - نسخة عربية','parents':[folder]},fields='id,webViewLink',supportsAllDrives=True).execute()
-    sid=copy['id']
-    presentation=slides.presentations().get(presentationId=sid).execute();pages=presentation.get('slides',[])
-    if len(pages)<11:raise RuntimeError('Google Slides template must have 11 slides (cover and 10 news slides).')
-    def replace(old,new,page):return {'replaceAllText':{'containsText':{'text':old,'matchCase':True},'replaceText':str(new),'pageObjectIds':[page]}}
-    cmds=[replace('{{ISSUE}}',snapshot['issue'],pages[0]['objectId']),replace('{{DATE}}',snapshot['date'],pages[0]['objectId'])]
-    for x,a in enumerate(snapshot['articles']):
-        pg=pages[x+1]['objectId']
-        for old,key in [('{{TITLE}}','headline'),('{{BODY}}','body'),('{{CATEGORY}}','category'),('{{URL}}','url')]:cmds.append(replace(old,a[key],pg))
-        # Only replace images after safe upload/approval and explicit asset hosting is implemented.
-        # Native replaceImage needs publicly fetchable URI; never use unlicensed stock previews.
-    slides.presentations().batchUpdate(presentationId=sid,body={'requests':cmds}).execute()
-    return f'https://docs.google.com/presentation/d/{sid}/edit',sid
+def get_credentials(scopes=SCOPES):
+    from google.oauth2.credentials import Credentials
+    email=session.get('email','').casefold()
+    with token_db() as c:r=c.execute('SELECT payload FROM google_oauth_tokens WHERE email=?',(email,)).fetchone()
+    if not r:raise RuntimeError('Connect Google publishing from the workspace first.')
+    token=json.loads(token_cipher().decrypt(r['payload'].encode()))
+    granted=set(str(token.get('scope','')).split())
+    if not set(scopes).issubset(granted):raise RuntimeError('Reconnect Google publishing and grant the requested document permissions.')
+    import datetime
+    expiry=datetime.datetime.fromtimestamp(token.get('expires_at',0),datetime.timezone.utc).replace(tzinfo=None)
+    creds=Credentials(token=token.get('access_token'),refresh_token=token.get('refresh_token'),token_uri='https://oauth2.googleapis.com/token',client_id=os.environ['GOOGLE_CLIENT_ID'],client_secret=os.environ['GOOGLE_CLIENT_SECRET'],scopes=SCOPES,expiry=expiry)
+    if not creds.valid:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
+        token['access_token']=creds.token;token['expires_at']=creds.expiry.replace(tzinfo=datetime.timezone.utc).timestamp();store_google_token(email,token)
+    return creds
 
-def create_google_short_doc(docx_bytes,snapshot):
-    """Convert generated short DOCX into native Google Doc in the issue folder."""
+def upload_google_file(data,mimetype,target_mimetype,name):
+    from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseUpload
-    import io
-    missing=[k for k in ('GOOGLE_DRIVE_FOLDER_ID',) if not os.getenv(k)]
-    if missing: raise RuntimeError('Missing '+', '.join(missing))
-    creds=get_credentials(SCOPES+['https://www.googleapis.com/auth/documents'])
-    drive=build('drive','v3',credentials=creds,cache_discovery=False)
-    media=MediaIoBaseUpload(io.BytesIO(docx_bytes),mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',resumable=False)
-    obj=drive.files().create(body={'name':f'مختصر نشرة الذكاء الاصطناعي {snapshot["issue"]}','mimeType':'application/vnd.google-apps.document','parents':[os.environ['GOOGLE_DRIVE_FOLDER_ID']]},media_body=media,fields='id,webViewLink',supportsAllDrives=True).execute()
-    return obj.get('webViewLink') or ('https://docs.google.com/document/d/'+obj['id']+'/edit'),obj['id']
+    drive=build('drive','v3',credentials=get_credentials(),cache_discovery=False)
+    metadata={'name':name,'mimeType':target_mimetype}
+    # Optional folder must be accessible to this app; no shared-drive-wide privileges.
+    if os.getenv('GOOGLE_DRIVE_FOLDER_ID'):metadata['parents']=[os.environ['GOOGLE_DRIVE_FOLDER_ID']]
+    obj=drive.files().create(body=metadata,media_body=MediaIoBaseUpload(io.BytesIO(data),mimetype=mimetype,resumable=False),fields='id,webViewLink',supportsAllDrives=True).execute()
+    return obj['webViewLink'],obj['id']
+def create_google_slides(snapshot,deck_bytes):
+    return upload_google_file(deck_bytes,'application/vnd.openxmlformats-officedocument.presentationml.presentation','application/vnd.google-apps.presentation',f'نشرة الذكاء الاصطناعي {snapshot["issue"]} - نسخة عربية')
+def create_google_short_doc(docx_bytes,snapshot):
+    return upload_google_file(docx_bytes,'application/vnd.openxmlformats-officedocument.wordprocessingml.document','application/vnd.google-apps.document',f'مختصر نشرة الذكاء الاصطناعي {snapshot["issue"]}')

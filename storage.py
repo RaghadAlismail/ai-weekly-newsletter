@@ -57,3 +57,20 @@ def initialize(data_dir):
             c.executescript(SQLITE_SCHEMA)
             cols=[r['name'] for r in c.execute('PRAGMA table_info(articles)').fetchall()]
             if 'image_local' not in cols:c.execute("ALTER TABLE articles ADD COLUMN image_local TEXT DEFAULT ''")
+
+# Additive migrations preserve existing issues and approval snapshots.
+def migrate_workflow(data_dir):
+    columns={'workflow_stage':"TEXT DEFAULT 'draft'",'owner_email':"TEXT DEFAULT ''",'reviewer_email':"TEXT DEFAULT ''",'designer_email':"TEXT DEFAULT ''",'final_email':"TEXT DEFAULT ''",'content_revision':'INTEGER DEFAULT 0','generation_error':"TEXT DEFAULT ''"}
+    with database(data_dir) as c:
+        if os.getenv('DATABASE_URL'):
+            for name,kind in columns.items():c.execute(f'ALTER TABLE issues ADD COLUMN IF NOT EXISTS {name} {kind}')
+        else:
+            existing={r['name'] for r in c.execute('PRAGMA table_info(issues)').fetchall()}
+            for name,kind in columns.items():
+                if name not in existing:c.execute(f'ALTER TABLE issues ADD COLUMN {name} {kind}')
+        c.execute("UPDATE issues SET workflow_stage='approved' WHERE status='approved'")
+        c.execute('CREATE TABLE IF NOT EXISTS article_media(article_id BIGINT PRIMARY KEY REFERENCES articles(id), payload TEXT NOT NULL)')
+        idkind='BIGSERIAL PRIMARY KEY' if os.getenv('DATABASE_URL') else 'INTEGER PRIMARY KEY'
+        c.execute(f'CREATE TABLE IF NOT EXISTS issue_versions(id {idkind}, issue_id BIGINT NOT NULL REFERENCES issues(id), revision INTEGER NOT NULL, snapshot TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)')
+        c.execute('CREATE TABLE IF NOT EXISTS google_oauth_tokens(email TEXT PRIMARY KEY,payload TEXT NOT NULL)')
+        c.execute('CREATE TABLE IF NOT EXISTS generated_decks(issue_id BIGINT PRIMARY KEY REFERENCES issues(id), revision INTEGER NOT NULL, payload TEXT NOT NULL)')

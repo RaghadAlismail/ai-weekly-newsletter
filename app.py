@@ -34,7 +34,7 @@ def secure_headers(resp):
     return resp
 
 app.config['MAX_CONTENT_LENGTH']=6*1024*1024
-CATEGORIES=['حكومات','شركات','جامعات','منظمات']
+CATEGORIES=['حكومات','شركات','دراسات','جامعات','منظمات']
 STAGES=['content','language','design','final']
 STAGE_AR={'content':'مراجعة المحتوى','language':'التدقيق اللغوي','design':'مراجعة التصميم','final':'الاعتماد النهائي'}
 ROLE_PERMISSIONS={'coordinator':{'content','language','design'},'content_reviewer':{'content'},'language_reviewer':{'language'},'designer':{'design'},'approver':{'final'},'admin':set(STAGES)}
@@ -80,7 +80,9 @@ def safeurl(s):
     return True
 
 def verify_access(aid):
-    a=article(aid); i=issue(a['issue_id']);require_login(); writable(i);return a,i
+    a=article(aid); i=issue(a['issue_id']);require_login(); writable(i);
+    from workflow import check_edit
+    check_edit(i,actor(),role());return a,i
 
 @app.route('/login')
 def login():
@@ -93,6 +95,15 @@ def google_start():
     if client is None:abort(503,'Google OAuth is not configured')
     return client.authorize_redirect(url_for('google_callback',_external=True))
 
+@app.route('/connect/google-publishing')
+def connect_google_publishing():
+    require_login()
+    session['publishing_connect_email']=actor().casefold()
+    client=oauth.create_client('google')
+    if client is None:abort(503,'Google authentication is not configured')
+    from google_publish import SCOPES
+    return client.authorize_redirect(url_for('google_callback',_external=True),scope='openid email profile '+' '.join(SCOPES),access_type='offline',prompt='consent')
+
 @app.route('/auth/callback')
 def google_callback():
     try:
@@ -104,6 +115,12 @@ def google_callback():
         app.logger.exception('OAuth sign-in failed')
         abort(403,'Google sign-in failed')
     if not identity:abort(403,'Google account is not authorized for this workspace.')
+    connect_email=session.get('publishing_connect_email')
+    if connect_email:
+        if connect_email!=identity['email']:abort(403,'Connect publishing with the same Google account used for the workspace.')
+        from google_publish import store_google_token,SCOPES
+        if not set(SCOPES).issubset(set(str(token.get('scope','')).split())):abort(403,'Google document permissions were not granted.')
+        store_google_token(identity['email'],token)
     session.clear()
     session.update(email=identity['email'], display_name=identity['name'])
     session.permanent=True
@@ -203,21 +220,21 @@ def new_issue():
         for j in range(1,11):
             u=request.form.get('url_'+str(j),'').strip()
             if not u:continue
-            category=request.form.get('category_'+str(j),'').strip() or 'شركات'
+            category=request.form.get('category_'+str(j),'').strip()
             img=request.form.get('image_'+str(j),'').strip()
-            if not safeurl(u) or category not in CATEGORIES or (img and not safeurl(img)):
+            if not safeurl(u) or (category and category not in CATEGORIES) or (img and not safeurl(img)):
                 flash('Use valid public URLs and an available category.','error');return redirect(request.url)
             entries.append((u,request.form.get('content_'+str(j),'').strip(),request.form.get('title_'+str(j),'').strip(),category,img))
-        if not entries or len({x[0] for x in entries})!=len(entries):
-            flash('Enter at least one article URL. Article URLs must be distinct.','error');return redirect(request.url)
+        if len(entries)!=10 or len({x[0] for x in entries})!=10:
+            flash('Enter exactly ten distinct article URLs. All other fields are optional.','error');return redirect(request.url)
         with db() as c:
             try:
-                cur=c.execute('INSERT INTO issues(number,pub_date) VALUES(?,?)'+(' RETURNING id' if os.getenv('DATABASE_URL') else ''),(num,date));iid=cur.fetchone()['id'] if os.getenv('DATABASE_URL') else cur.lastrowid
+                cur=c.execute('INSERT INTO issues(number,pub_date,owner_email) VALUES(?,?,?)'+(' RETURNING id' if os.getenv('DATABASE_URL') else ''),(num,date,actor().casefold()));iid=cur.fetchone()['id'] if os.getenv('DATABASE_URL') else cur.lastrowid
             except (sqlite3.IntegrityError, __import__('psycopg').IntegrityError):flash('Issue number already exists','error');return redirect(request.url)
             for j,(u,content,title,category,img) in enumerate(entries,1):
                 c.execute('INSERT INTO articles(issue_id,position,url,supplied_content,source_title,category,image_url) VALUES(?,?,?,?,?,?,?)',(iid,j,u,content,title,category,img))
             audit(c,iid,None,'issue_created',{'urls':len(entries)})
-        return redirect(url_for('view_issue',iid=iid))
+        return app.view_functions['generate_draft'](iid)
     return render_template('new.html',date=datetime.date.today().isoformat())
 @app.route('/issues/<int:iid>')
 def view_issue(iid):
@@ -232,22 +249,36 @@ def edit_article(aid):
     require_login();a=article(aid);i=issue(a['issue_id'])
     with db() as c:reviews=c.execute('SELECT * FROM reviews WHERE article_id=? ORDER BY id DESC',(aid,)).fetchall()
     return render_template('article.html',a=a,i=i,categories=CATEGORIES,reviews=reviews,stages=STAGE_AR)
+def lock_article_edit(c,i):
+    locked=c.execute('SELECT * FROM issues WHERE id=?'+(' FOR UPDATE' if os.getenv('DATABASE_URL') else ''),(i['id'],)).fetchone()
+    if locked['status']=='approved' or locked['workflow_stage']!=i['workflow_stage'] or locked['content_revision']!=i['content_revision']:abort(409,'The newsletter changed. Refresh before saving.')
+
 @app.route('/articles/<int:aid>/save',methods=['POST'])
 def save(aid):
-    allow_roles('coordinator','content_reviewer','language_reviewer','designer','admin')
+    allow_roles('coordinator','content_reviewer','language_reviewer','designer','approver','admin')
     a,i=verify_access(aid)
     updates={k:request.form.get(k,'').strip() for k in ('headline','body','category','image_url','image_asset_id','image_license_status','supplied_content')}
     if updates['category'] not in CATEGORIES:abort(400)
     if updates['image_license_status'] not in ('unverified','approved','not_required'):abort(400)
     if updates['image_url'] and not safeurl(updates['image_url']):abort(400)
+    new_image=None
+    if updates['image_url'] and updates['image_url']!=a['image_url']:
+        from source_fetch import fetch_image
+        try:new_image=fetch_image(updates['image_url'])
+        except Exception:flash('The image URL could not be loaded. Use a valid image URL or upload an image.','error');return redirect(url_for('edit_article',aid=aid))
     with db() as c:
+        lock_article_edit(c,i)
         c.execute('UPDATE articles SET headline=?,body=?,category=?,image_url=?,image_asset_id=?,image_license_status=?,supplied_content=?,revision=revision+1 WHERE id=?',(*updates.values(),aid))
         audit(c,i['id'],aid,'article_saved',{'new_revision':a['revision']+1})
+        if new_image:
+            import base64
+            c.execute('INSERT INTO article_media(article_id,payload) VALUES(?,?) ON CONFLICT(article_id) DO UPDATE SET payload=excluded.payload',(aid,base64.b64encode(new_image).decode()))
+        workflow_helpers['touch'](i['id'],'Article content edited',any(updates[k]!=a[k] for k in ('headline','body','category','supplied_content')),c)
     flash('Saved. Previous approvals are no longer valid for this article.','success')
     return redirect(url_for('edit_article',aid=aid))
 @app.route('/articles/<int:aid>/upload-image',methods=['POST'])
 def upload_image(aid):
-    allow_roles('coordinator','designer','admin')
+    allow_roles('coordinator','content_reviewer','language_reviewer','designer','approver','admin')
     a,i=verify_access(aid)
     f=request.files.get('image')
     if not f or not f.filename or Path(f.filename).suffix.lower() not in ('.png','.jpg','.jpeg','.webp'):
@@ -262,8 +293,13 @@ def upload_image(aid):
     folder=DATA/'images';folder.mkdir(exist_ok=True)
     (folder/name).write_bytes(buf)
     with db() as c:
+        lock_article_edit(c,i)
         c.execute("UPDATE articles SET image_local=?,image_license_status='unverified',revision=revision+1 WHERE id=?",(name,aid))
         audit(c,i['id'],aid,'image_uploaded',{'filename':name})
+        import base64
+        im=PIL.Image.open(io.BytesIO(buf)).convert('RGB');media=io.BytesIO();im.save(media,'JPEG',quality=94)
+        c.execute('INSERT INTO article_media(article_id,payload) VALUES(?,?) ON CONFLICT(article_id) DO UPDATE SET payload=excluded.payload',(aid,base64.b64encode(media.getvalue()).decode()))
+        workflow_helpers['touch'](i['id'],'Image updated',False,c)
     flash('Image uploaded. Confirm rights and save before design approval.','success')
     return redirect(url_for('edit_article',aid=aid))
 
@@ -274,7 +310,7 @@ def extract(aid):
     if a['supplied_content'].strip():
         title=a['source_title'] or 'User-supplied article';text=a['supplied_content'];result={'image_url':a['image_url'],'manual_review_required':False};status='supplied'
     else:
-        from fetch_article import fetch_article
+        from source_fetch import fetch_article
         try:
             result=fetch_article(a['url']);title=result.get('title') or '';text=result.get('text') or '';status='ready' if len(text)>=200 and not result.get('manual_input_required') else 'needs_input'
         except Exception as ex:title='';text='';result={'error':str(ex)};status='needs_input'
@@ -292,18 +328,20 @@ def generate(aid):
     try:
         from write_summary import write_summary
         # Map actual approved category to legacy writer only for prompt; replace with issue-specific instructions afterwards.
-        category_en={'حكومات':'Governments','شركات':'Companies','جامعات':'Universities','منظمات':'Organizations'}[a['category']]
+        category_en={'حكومات':'Governments','شركات':'Companies','جامعات':'Universities','منظمات':'Organizations','دراسات':'Studies'}[a['category']]
         result=write_summary(a['source_title'] or a['url'],content,category_en)
         headline=result.get('title_ar','').strip();body=result.get('body_ar','').strip()
         if not headline or not body:raise ValueError('Model output missing Arabic fields')
         with db() as c:
             c.execute('UPDATE articles SET headline=?,body=?,revision=revision+1 WHERE id=?',(headline,body,aid));audit(c,i['id'],aid,'ai_generated')
+        workflow_helpers['touch'](i['id'],'Article regenerated',True)
         flash('Draft generated. Human review is required.','success')
     except Exception as exc:flash('Generation failed: '+str(exc)[:220],'error')
     return redirect(url_for('edit_article',aid=aid))
 @app.route('/articles/<int:aid>/review',methods=['POST'])
 def review(aid):
-    allow_roles('coordinator','content_reviewer','language_reviewer','designer','admin')
+    abort(409,'Use the whole-newsletter review decision on the issue dashboard.')
+    allow_roles('coordinator','content_reviewer','language_reviewer','designer','approver','admin')
     a,i=verify_access(aid)
     stage=request.form.get('stage','');decision=request.form.get('decision','')
     if stage not in STAGES[:-1] or stage not in ROLE_PERMISSIONS.get(role(),set()) or decision not in ('approved','changes_requested'):abort(403)
@@ -323,6 +361,7 @@ def latest_reviews(c,iid):
     return aa,issues
 @app.route('/issues/<int:iid>/approve',methods=['POST'])
 def approve(iid):
+    abort(409,'Use the sequential final reviewer approval on the issue dashboard.')
     require_login();i=issue(iid);writable(i)
     if role() not in ('approver','admin'):abort(403)
     with db() as c:
@@ -383,11 +422,16 @@ def publish_slides(iid):
     if role() not in ('approver','admin'):abort(403)
     try:
         from google_publish import create_google_slides
-        url,id_=create_google_slides(json.loads(i['approved_snapshot']))
+        from deck_builder import build_deck
+        data=json.loads(i['approved_snapshot'])
+        url,id_=create_google_slides(data,build_deck(data,workflow_helpers['media'](iid)))
         with db() as c:c.execute('INSERT INTO publications(issue_id,kind,external_id,source_snapshot,status) VALUES(?,?,?,?,?)',(iid,'arabic_slides',id_,i['approved_snapshot'],'created'));audit(c,iid,None,'published_slides',{'presentation_id':id_})
         flash('Native Google Slides created: '+url,'success')
     except Exception as ex:flash('Google Slides setup required: '+str(ex)[:260],'error')
     return redirect(url_for('view_issue',iid=iid))
 @app.context_processor
 def context():return {'current_user':session.get('display_name',actor()),'current_role':role(),'STAGE_AR':STAGE_AR,'csrf_token':csrf_token}
+from workflow import register_workflow
+workflow_helpers={'db':db,'issue':issue,'actor':actor,'role':role,'require_login':require_login,'authorized_people':authorized_people,'audit':audit,'DATA':DATA,'CATEGORIES':CATEGORIES,'now':now}
+register_workflow(app,workflow_helpers)
 if __name__=='__main__':app.run(host='127.0.0.1',port=int(os.getenv('PORT','5055')),debug=False)
