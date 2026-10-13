@@ -7,6 +7,8 @@ def copy_problems(result):
     problems = []
     if not title or len(title) > 110 or not re.search("[\u0600-\u06ff]", title) or re.search("[A-Za-z]", re.sub(r"\([^)]*\)", "", title)):
         problems.append("Arabic headline must use Arabic, with English names only in parentheses, and at most 110 characters")
+    if title.split() and title.split()[0] in {"أعلنت", "كشفت", "أطلقت", "أفادت", "طوّر", "طور", "طوّرت", "طورت", "كشف", "حذّر", "حذر", "حذّرت", "تدرس", "أتاحت", "بدأت", "وافقت", "أقرّت", "أقرت"}:
+        problems.append("Headline must start with the Arabic actor/name, followed by the verb")
     if not body or not 40 <= len(body.split()) <= 170:
         problems.append("Arabic summary must contain 40-170 words")
     return problems
