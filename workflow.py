@@ -76,16 +76,12 @@ def register_workflow(app,h):
             revision=c.execute('SELECT revision FROM articles WHERE id=?',(a['id'],)).fetchone()['revision']
             c.execute('INSERT INTO validated_article_generations(article_id,revision) VALUES(?,?) ON CONFLICT(article_id) DO UPDATE SET revision=excluded.revision',(a['id'],revision))
 
-    def run(iid,who):
+    def run(iid,who,article_ids=None):
         with app.app_context():
             try:
                 failures=[]
                 def guarded(a):
                     try:
-                        with db() as c:
-                            cached=c.execute('SELECT v.article_id FROM validated_article_generations v JOIN article_media m ON m.article_id=v.article_id WHERE v.article_id=? AND v.revision=?',(a['id'],a['revision'])).fetchone()
-                        if a['headline'] and a['body'] and not a['extract_notes'] and cached:
-                            return None
                         process(a)
                     except Exception as ex:
                         message=f"Article {a['position']}: {str(ex)[:180]}"
@@ -94,7 +90,10 @@ def register_workflow(app,h):
                         with db() as c:c.execute('UPDATE articles SET extract_notes=? WHERE id=?',(message,a['id']))
                         return message
                 with ThreadPoolExecutor(max_workers=1) as pool:
-                    failures=[x for x in pool.map(guarded,rows(iid)) if x]
+                    targets=[a for a in rows(iid) if article_ids is None or a['id'] in article_ids]
+                    failures=[x for x in pool.map(guarded,targets) if x]
+                all_rows=rows(iid);all_media=media(iid)
+                failures=[a['extract_notes'] or f"Article {a['position']}: Generation is not complete yet." for a in all_rows if a['extract_notes'] or not a['headline'] or not a['body'] or a['id'] not in all_media]
                 if failures:raise ValueError('\n'.join(failures))
                 deck=build_deck(snapshot(iid),media(iid))
                 with db() as c:
@@ -120,8 +119,55 @@ def register_workflow(app,h):
             active.add(iid)
         with db() as c:
             c.execute("UPDATE issues SET workflow_stage='generating',generation_error='' WHERE id=?",(iid,));audit(c,iid,None,'generation_started')
-        threading.Thread(target=run,args=(iid,actor()),daemon=True).start()
+        retry_ids=None
+        if i['workflow_stage']=='generation_failed':
+            images=media(iid)
+            retry_ids={a['id'] for a in rows(iid) if a['extract_notes'] or not a['headline'] or not a['body'] or a['id'] not in images}
+        threading.Thread(target=run,args=(iid,actor(),retry_ids),daemon=True).start()
         flash('Generation started. Refresh this issue to follow progress.','success');return redirect(url_for('view_issue',iid=iid))
+
+
+    @app.route('/articles/<int:aid>/retry-generation',methods=['POST'])
+    def retry_article_generation(aid):
+        require()
+        with db() as c:
+            article=c.execute('SELECT * FROM articles WHERE id=?',(aid,)).fetchone()
+        if not article:abort(404)
+        iid=article['issue_id'];i=issue(iid);check_edit(i,actor(),role())
+        if i['workflow_stage']!='generation_failed' or not article['extract_notes']:
+            abort(409,'Only a failed article can be retried. Wait for current generation to finish.')
+        try:revision=int(request.form.get('article_revision','-1'))
+        except ValueError:abort(400)
+        if revision!=article['revision']:abort(409,'This article changed. Refresh before retrying.')
+        text=request.form.get('original_text','').strip()
+        title=request.form.get('original_title','').strip()
+        if text and len(text)<200:
+            flash('Paste at least 200 characters of the original article text.','error')
+            return redirect(url_for('edit_article',aid=aid))
+        if not text and len((article['supplied_content'] or article['source_text'] or '').strip())<200:
+            flash('Paste the original article text before retrying this article.','error')
+            return redirect(url_for('edit_article',aid=aid))
+        if not os.getenv('OPENAI_API_KEY') or not os.getenv('NEWSLETTER_TEMPLATE_KEY'):
+            flash('Generation credentials or template are not configured.','error')
+            return redirect(url_for('edit_article',aid=aid))
+        with lock:
+            if iid in active:abort(409,'Generation is already running.')
+            active.add(iid)
+        try:
+            with db() as c:
+                cur=c.execute("UPDATE issues SET workflow_stage='generating',generation_error='',content_revision=content_revision+1 WHERE id=? AND workflow_stage='generation_failed' AND content_revision=?",(iid,i['content_revision']))
+                if cur.rowcount!=1:abort(409,'This issue changed. Refresh before retrying.')
+                if text:
+                    cur=c.execute("UPDATE articles SET supplied_content=?,source_text=?,source_title=?,extract_status='supplied',revision=revision+1 WHERE id=? AND revision=?",(text,text,title or article['source_title'],aid,revision))
+                    if cur.rowcount!=1:abort(409,'This article changed. Refresh before retrying.')
+                c.execute('DELETE FROM generated_decks WHERE issue_id=?',(iid,))
+                audit(c,iid,aid,'article_generation_retried',{'original_text_supplied':bool(text)})
+            threading.Thread(target=run,args=(iid,actor(),{aid}),daemon=True).start()
+        except BaseException:
+            with lock:active.discard(iid)
+            raise
+        flash('Retry started for this article only. Other articles will not be regenerated.','success')
+        return redirect(url_for('view_issue',iid=iid))
 
     @app.route('/issues/<int:iid>/assign',methods=['POST'])
     def assign_reviewers(iid):
