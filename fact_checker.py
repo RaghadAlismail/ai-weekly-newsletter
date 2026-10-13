@@ -2,6 +2,7 @@
 import json
 import os
 import requests
+from ai_request import post_completion
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
@@ -64,7 +65,7 @@ Arabic Body: {summary['body_ar']}
 
 Compare every fact in the summaries against the original article. Return corrected JSON."""
 
-    resp = requests.post(
+    resp = post_completion(
         "https://api.openai.com/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -77,7 +78,6 @@ Compare every fact in the summaries against the original article. Return correct
                 {"role": "user", "content": user_prompt},
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.1,
         },
         timeout=60,
     )

@@ -2,6 +2,7 @@
 import json
 import os
 import requests
+from ai_request import post_completion
 
 from glossary import glossary_prompt_hint
 
@@ -114,7 +115,7 @@ def write_summary(article_title: str, article_text: str, category_en: str) -> di
 
     user_prompt = _build_user_prompt(article_title, article_text, category_en)
 
-    resp = requests.post(
+    resp = post_completion(
         "https://api.openai.com/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -127,7 +128,6 @@ def write_summary(article_title: str, article_text: str, category_en: str) -> di
                 {"role": "user", "content": user_prompt},
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.3,
         },
         timeout=60,
     )

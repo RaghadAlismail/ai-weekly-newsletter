@@ -2,6 +2,7 @@
 import json
 import os
 import requests
+from ai_request import post_completion
 
 from glossary import glossary_prompt_hint
 
@@ -104,7 +105,7 @@ def review_summary(summary: dict, category_en: str = "", article_title: str = ""
     prompt_parts.append("Return corrected JSON.")
     user_prompt = "\n\n".join(prompt_parts)
 
-    resp = requests.post(
+    resp = post_completion(
         "https://api.openai.com/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -117,7 +118,6 @@ def review_summary(summary: dict, category_en: str = "", article_title: str = ""
                 {"role": "user", "content": user_prompt},
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.2,
         },
         timeout=60,
     )
