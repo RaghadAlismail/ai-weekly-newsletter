@@ -3,80 +3,15 @@ import json
 import os
 import requests
 from ai_request import post_completion
+from editorial_policy import ARABIC_EDITORIAL_POLICY
 
 from glossary import glossary_prompt_hint
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
 
-REVIEW_PROMPT = """You are a strict quality reviewer for "الذكاء الاصطناعي في أسبوع" (Artificial Intelligence in a Week) newsletter.
-
-Review the EN and AR summaries below and fix ANY issues. Return corrected versions.
-
-## RULES TO ENFORCE:
-
-### Source Fidelity — Critical
-1. Every claim in both EN and AR must be explicitly supported by the supplied source article text.
-2. Never infer, analyze, generalize, speculate, or add external context.
-3. Do not add nationality, job title, organization description, dates, figures, benchmarks, implications, or product details unless they appear in the source.
-4. Remove phrases such as "ويعكس ذلك..."، "ومن المتوقع..."، "وقد يساهم..."، "في خطوة ثورية..." unless explicitly stated in the source.
-
-### Arabic Title Rules
-1. Start with the actor/entity or noun, not a past-tense verb.
-2. Use Arabic script only. Do not include Latin letters, English names or nationality.
-3. Keep the headline concise, at most 110 characters.
-4. Companies: شركة ... تطلق / شركة ... تكشف / شركة ... تعلن.
-5. Research: باحثون من جامعة ... يطوّرون / دراسة ... تكشف.
-6. Governments: حكومة ... تعلن / وزارة ... تطلق / هيئة ... تعتمد.
-7. Put English organization and product names in parentheses in the BODY only.
-
-### Arabic Body Rules
-1. Body_ar must be ONE paragraph only.
-2. Opening/key sentence: it is the most important sentence, usually first sentence or first two lines. It must start with a direct past-tense verb such as أعلنت، طوّر، كشفت، أتاحت، حذّر، أطلقت، بدأت، أفادت.
-3. Avoid generic openings such as "في خطوة جديدة..."، "ضمن جهود..."، "يشهد القطاع..."، "أصبح الذكاء الاصطناعي...".
-4. Immediately after the opening verb, write the actor/entity as Arabic Name (English Name), adding nationality only when explicitly stated or clearly supported by the source. Never invent nationality or descriptions.
-5. Immediately state the main event: model launch, tool development, study publication/result, feature addition, agreement, risk warning, or source-supported equivalent.
-6. The first Arabic sentence must summarize the whole news without opinion, analysis, prediction, exaggeration, or marketing language; remove phrases such as "خطوة ثورية"، "نقلة نوعية"، "سيغيّر العالم"، "غير مسبوق عالميًا" unless directly in the source and attributed.
-7. The middle should follow: what happened → how it works/what it includes → important figures/results → additional factual source-only details.
-8. Closing sentence must close smoothly with source-supported availability/launch timing, next step/future plan, limitation/current phase, or direct objective when present. Do not add predictions, broad conclusions, unsupported future effects, political/economic analysis, or phrases like "وقد يغيّر"، "ومن المتوقع"، "ما يعكس"، "في خطوة تؤكد" unless directly sourced.
-9. Tone must be formal, clear, professional, neutral, and concise, like Reuters/Bloomberg Arabic business reporting.
-10. Numbers must always be in parentheses: (%32), (1) مليون, (3) مرات, (60–90) درجة مئوية.
-11. Ideally 90-120 words. A 50-word tolerance is acceptable (hard range: 40-170 words); if you edit the body, prefer moving it toward 90-120 without adding unsupported facts.
-12. Apply the SDAIA Data & AI glossary / معجم البيانات والذكاء الاصطناعي and fix non-conforming Arabic terminology.
-
-### English Title Rules
-1. Statement form: "Subject launches/unveils/develops Y".
-2. Professional tone, no clickbait.
-3. Full company or institution name when supported by the source.
-
-### English Body Rules
-1. Ideally 90-120 words, factual, third-person, usually 2-3 substantial sentences. A 50-word tolerance is acceptable (hard range: 40-170 words); if you edit the body, prefer moving it toward 90-120.
-2. Start with the full company or institution name when supported by the source.
-3. Include abbreviations, figures, dates, partnerships, or product details only if present in the source.
-4. Ensure English AI/data terminology aligns conceptually with the SDAIA glossary terms used in Arabic.
-
-### Universities / Studies Checks
-1. University and study entries must explicitly name the university/institution when the source provides it.
-2. Reject generic summaries such as "researchers developed..." if the source provides a named institution or concrete finding.
-3. The summary must describe the concrete research achievement, study result, or outcome.
-4. Include lab, department, named researcher, center, collaborator, benchmark, date, publication venue, funding, or partner only when explicitly supplied by the source.
-
-### Cross-check
-- EN and AR must describe the same source-supported facts.
-- No contradictions between versions.
-- Preserve the article's category framing; approved Arabic categories are only: حكومات، شركات، جامعات، دراسات.
-- Preserve the body length rule whenever you make corrections: ideal 90-120 words; acceptable hard range 40-170 words (±50-word tolerance). If correcting text, prefer the ideal range.
-- Perform a final SDAIA Data & AI glossary terminology QA pass before returning JSON.
-
-Return JSON with these fields:
-{
-  "title_en": "corrected or original",
-  "body_en": "corrected or original",
-  "title_ar": "corrected or original",
-  "body_ar": "corrected or original",
-  "changes": ["list of changes made, or empty if approved as-is"],
-  "approved": true/false
-}"""
+REVIEW_PROMPT = ARABIC_EDITORIAL_POLICY + """\nReview and correct the submitted Arabic headline and body against the original source and every editorial rule.
+Return JSON with fields title_ar, body_ar, title_en, body_en, changes (array), approved (boolean). Set title_en and body_en to empty strings; generate no English summary.\n"""
 
 
 def review_summary(summary: dict, category_en: str = "", article_title: str = "", article_text: str = "") -> dict:

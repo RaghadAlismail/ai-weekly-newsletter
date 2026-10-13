@@ -3,45 +3,13 @@ import json
 import os
 import requests
 from ai_request import post_completion
+from editorial_policy import ARABIC_EDITORIAL_POLICY
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
 
-FACT_CHECK_PROMPT = """You are a strict fact-checker for a professional AI newsletter. Your ONLY job is to verify factual accuracy and source fidelity.
-
-Compare the generated summaries against the original source article. Check for:
-
-1. **Dates**: Every date, quarter, year must match the source exactly. If source says Q4 2025, summary must NOT say Q4 2026.
-2. **Numbers**: All numbers, percentages, financial figures, measurements must match exactly.
-3. **Company names**: Must be spelled correctly and refer to the right entity.
-4. **Product names**: Must match the source exactly.
-5. **Financial figures**: Revenue, growth rates, valuations must match source.
-6. **Claims**: No fabricated details. Every claim in the summary must be explicitly present in the source article.
-7. **Attributions**: Quotes and statements must be attributed to the correct person/entity.
-8. **No external context**: Do not allow nationality, job title, organization description, political/economic interpretation, implications, or background context unless the source explicitly states it.
-9. **Arabic opening/key sentence**: The first Arabic sentence must start with a direct past-tense verb, immediately identify the source-supported actor/entity as Arabic Name (English Name), include nationality only when source-supported, and state the main event without opinion, analysis, prediction, hype, or marketing language.
-10. **Arabic closing sentence**: The final Arabic sentence must close with source-supported availability/launch timing, next step/future plan, limitation/current phase, direct objective, or another factual source-supported detail. Remove unsupported predictions, broad conclusions, future effects, political/economic analysis, or phrases such as "وقد يغيّر"، "ومن المتوقع"، "ما يعكس"، "في خطوة تؤكد".
-
-Rules:
-- If you find ANY factual error, correct it and list the change.
-- Do NOT change style, tone, or structure — only fix factual errors.
-- Preserve the newsletter body length requirement after any correction: English body and Arabic body should ideally be 90-120 words, with a 50-word tolerance around the ideal range (hard range: 40-170 words). If you edit a body, prefer moving it toward 90-120 without adding unsupported facts.
-- If everything is accurate, return approved=true with no changes.
-- Be extremely precise. Even small discrepancies matter.
-- Enforce the Arabic editorial rule that the article may not add information beyond the source. If something is not explicitly in the source, remove it.
-- Enforce the source-only Arabic opening and closing rules without adding unsupported nationality, conclusions, or future implications.
-
-Focus on real factual/source-fidelity errors: wrong dates, wrong numbers, wrong product names, fabricated claims, unsupported context, or misattributed quotes.
-
-Return JSON:
-{
-  "title_en": "corrected or original",
-  "body_en": "corrected or original", 
-  "title_ar": "corrected or original",
-  "body_ar": "corrected or original",
-  "factual_issues": ["list of issues found, empty if none"],
-  "approved": true/false
-}"""
+FACT_CHECK_PROMPT = ARABIC_EDITORIAL_POLICY + """\nCheck every fact in the Arabic headline and paragraph against the original source. Correct mismatches or unsupported claims. Report approved=true only if the returned corrected Arabic copy is fully source-supported; otherwise approved=false and list remaining factual issues.
+Return JSON with fields title_ar, body_ar, title_en, body_en, factual_issues (array), approved (boolean). Set title_en and body_en to empty strings; generate no English summary.\n"""
 
 
 def fact_check(summary: dict, article_text: str) -> dict:

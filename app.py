@@ -34,7 +34,7 @@ def secure_headers(resp):
     return resp
 
 app.config['MAX_CONTENT_LENGTH']=6*1024*1024
-CATEGORIES=['حكومات','شركات','دراسات','جامعات','منظمات']
+CATEGORIES=['حكومات','شركات','جامعات','دراسات']
 STAGES=['content','language','design','final']
 STAGE_AR={'content':'مراجعة المحتوى','language':'التدقيق اللغوي','design':'مراجعة التصميم','final':'الاعتماد النهائي'}
 ROLE_PERMISSIONS={'coordinator':{'content','language','design'},'content_reviewer':{'content'},'language_reviewer':{'language'},'designer':{'design'},'approver':{'final'},'admin':set(STAGES)}

@@ -5,8 +5,8 @@ def copy_problems(result):
     title = str(result.get("title_ar", "")).strip()
     body = str(result.get("body_ar", "")).strip()
     problems = []
-    if not title or len(title) > 110 or re.search("[A-Za-z]", title):
-        problems.append("Arabic headline must be Arabic-only and at most 110 characters")
+    if not title or len(title) > 110 or not re.search("[\u0600-\u06ff]", title) or re.search("[A-Za-z]", re.sub(r"\([^)]*\)", "", title)):
+        problems.append("Arabic headline must use Arabic, with English names only in parentheses, and at most 110 characters")
     if not body or not 40 <= len(body.split()) <= 170:
         problems.append("Arabic summary must contain 40-170 words")
     return problems
